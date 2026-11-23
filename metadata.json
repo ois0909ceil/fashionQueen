@@ -1,0 +1,8 @@
+{
+  "name": "Remix 옷 차림",
+  "description": "나에게 맞는 옷차림을 추천해 주는 앱 \u0027옷 차림\u0027의 첫 화면(나에 대해)입니다.",
+  "requestFramePermissions": [],
+  "majorCapabilities": [
+    "MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"
+  ]
+}
