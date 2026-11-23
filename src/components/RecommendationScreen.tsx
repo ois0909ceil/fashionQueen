@@ -19,7 +19,7 @@ interface RecommendationScreenProps {
   weather: WeatherData;
   recommendation: OutfitRecommendation | null;
   isLoading: boolean;
-  hasError: boolean;
+  errorMessage: string | null;
   onRetry: () => void;
   onGoHome: () => void;
 }
@@ -31,7 +31,7 @@ export default function RecommendationScreen({
   weather,
   recommendation,
   isLoading,
-  hasError,
+  errorMessage,
   onRetry,
   onGoHome,
 }: RecommendationScreenProps) {
@@ -95,11 +95,11 @@ export default function RecommendationScreen({
                   AI가 옷을 고르는 중이에요…
                 </p>
               </div>
-            ) : hasError || !recommendation ? (
+            ) : errorMessage || !recommendation ? (
               <div className="py-10 flex flex-col items-center justify-center text-center gap-3">
                 <AlertCircle className="w-10 h-10 text-amber-600" aria-hidden="true" />
                 <p className="text-xl sm:text-2xl font-bold text-slate-900 text-balance">
-                  지금은 추천할 수 없어요. 잠시 후 다시 눌러 주세요
+                  {errorMessage ?? '지금은 추천할 수 없어요. 잠시 후 다시 눌러 주세요'}
                 </p>
               </div>
             ) : (

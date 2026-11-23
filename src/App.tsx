@@ -57,7 +57,7 @@ export default function App() {
   } | null>(null);
   const [recommendation, setRecommendation] = useState<OutfitRecommendation | null>(null);
   const [recommendLoading, setRecommendLoading] = useState(false);
-  const [recommendError, setRecommendError] = useState(false);
+  const [recommendError, setRecommendError] = useState<string | null>(null);
 
   const ageSectionRef = useRef<HTMLElement | null>(null);
   const genderSectionRef = useRef<HTMLElement | null>(null);
@@ -103,7 +103,7 @@ export default function App() {
     setWeatherSnapshot({ locationLabel, weather });
     setScreen('recommendation');
     setRecommendLoading(true);
-    setRecommendError(false);
+    setRecommendError(null);
     setRecommendation(null);
     window.scrollTo({ top: 0, behavior: 'smooth' });
 
@@ -125,23 +125,21 @@ export default function App() {
         }),
       });
 
-      if (!response.ok) {
-        setRecommendError(true);
-        return;
-      }
-
-      const data = (await response.json()) as {
+      const data = (await response.json().catch(() => ({}))) as {
         recommendation?: OutfitRecommendation;
+        error?: string;
       };
 
-      if (!data.recommendation) {
-        setRecommendError(true);
+      if (!response.ok || !data.recommendation) {
+        setRecommendError(
+          data.error || '지금은 추천할 수 없어요. 잠시 후 다시 눌러 주세요'
+        );
         return;
       }
 
       setRecommendation(data.recommendation);
     } catch {
-      setRecommendError(true);
+      setRecommendError('네트워크 연결을 확인한 뒤 다시 눌러 주세요.');
     } finally {
       setRecommendLoading(false);
     }
@@ -181,7 +179,7 @@ export default function App() {
         weather={weatherSnapshot.weather}
         recommendation={recommendation}
         isLoading={recommendLoading}
-        hasError={recommendError}
+        errorMessage={recommendError}
         onRetry={() => {
           void requestRecommendation(
             weatherSnapshot.locationLabel,
@@ -192,7 +190,7 @@ export default function App() {
           setScreen('profile');
           setWeatherSnapshot(null);
           setRecommendation(null);
-          setRecommendError(false);
+          setRecommendError(null);
           window.scrollTo({ top: 0, behavior: 'smooth' });
         }}
       />

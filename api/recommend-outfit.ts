@@ -28,6 +28,8 @@ type ApiRequest = IncomingMessage & {
 };
 
 const MAX_BODY_BYTES = 16 * 1024;
+const PRIMARY_MODEL = 'gemini-3.1-flash-lite';
+const FALLBACK_MODEL = 'gemini-2.5-flash';
 
 function parseOriginUrl(raw: string | undefined): string | null {
   if (!raw) return null;
@@ -159,6 +161,43 @@ function getGeminiClient(): GoogleGenAI | null {
   });
 }
 
+function getModelCandidates(): string[] {
+  const customModel = process.env.GEMINI_MODEL?.trim();
+  const candidates = [customModel, PRIMARY_MODEL, FALLBACK_MODEL].filter(
+    (m): m is string => Boolean(m)
+  );
+  return Array.from(new Set(candidates));
+}
+
+function extractHttpStatus(err: unknown): number | null {
+  if (!err || typeof err !== 'object') return null;
+  const record = err as Record<string, unknown>;
+  if (typeof record.status === 'number') return record.status;
+  if (typeof record.statusCode === 'number') return record.statusCode;
+  if (typeof record.code === 'number') return record.code;
+  if (typeof record.message === 'string') {
+    if (record.message.includes('404') || record.message.includes('NOT_FOUND')) {
+      return 404;
+    }
+    if (record.message.includes('403') || record.message.includes('PERMISSION_DENIED')) {
+      return 403;
+    }
+    if (record.message.includes('429') || record.message.includes('RESOURCE_EXHAUSTED')) {
+      return 429;
+    }
+    if (record.message.includes('API_KEY_INVALID')) {
+      return 400;
+    }
+  }
+  return null;
+}
+
+function stripJsonCodeFence(text: string): string {
+  const trimmed = text.trim();
+  const match = trimmed.match(/^```(?:json)?\s*([\s\S]*?)\s*```$/i);
+  return match ? match[1].trim() : trimmed;
+}
+
 export default async function handler(
   req: ApiRequest,
   res: ServerResponse
@@ -230,7 +269,9 @@ export default async function handler(
 
   const ai = getGeminiClient();
   if (!ai) {
-    sendJson(res, 500, { error: 'Gemini API 키가 설정되지 않았어요.' });
+    sendJson(res, 500, {
+      error: '서버에 GEMINI_API_KEY 환경 변수가 설정되지 않았어요.',
+    });
     return;
   }
 
@@ -261,85 +302,120 @@ export default async function handler(
     '7. 반드시 지정된 JSON 형식으로만 답해 주세요.',
   ].join('\n');
 
-  try {
-    const response = await ai.models.generateContent({
-      model: 'gemini-4-hydrogen',
-      contents: prompt,
-      config: {
-        systemInstruction:
-          '당신은 한국인의 일상과 날씨에 맞춰 실용적이고 단정한 옷차림을 안내하는 친절한 코디 도우미입니다. 반드시 쉬운 한국어 존댓말로 답하고 특정 브랜드명은 쓰지 마세요.',
-        responseMimeType: 'application/json',
-        responseSchema: {
-          type: Type.OBJECT,
-          properties: {
-            outer: {
-              type: Type.STRING,
-              description:
-                '겉옷 추천 한 줄 (예: 가벼운 베이지 면 재킷 — 필요 없으면 가벼운 카디건 등 실용적 표현)',
+  const modelCandidates = getModelCandidates();
+  let lastError: unknown = null;
+
+  for (const modelName of modelCandidates) {
+    try {
+      const response = await ai.models.generateContent({
+        model: modelName,
+        contents: prompt,
+        config: {
+          systemInstruction:
+            '당신은 한국인의 일상과 날씨에 맞춰 실용적이고 단정한 옷차림을 안내하는 친절한 코디 도우미입니다. 반드시 쉬운 한국어 존댓말로 답하고 특정 브랜드명은 쓰지 마세요.',
+          responseMimeType: 'application/json',
+          responseSchema: {
+            type: Type.OBJECT,
+            properties: {
+              outer: {
+                type: Type.STRING,
+                description:
+                  '겉옷 추천 한 줄 (예: 가벼운 베이지 면 재킷 — 필요 없으면 가벼운 카디건 등 실용적 표현)',
+              },
+              top: {
+                type: Type.STRING,
+                description: '상의 추천 한 줄',
+              },
+              bottom: {
+                type: Type.STRING,
+                description: '하의 추천 한 줄',
+              },
+              shoes: {
+                type: Type.STRING,
+                description: '신발 추천 한 줄',
+              },
+              accessory: {
+                type: Type.STRING,
+                description: '소품 추천 한 줄 (비 올 확률이 높으면 우산 포함)',
+              },
+              reason: {
+                type: Type.STRING,
+                description: '오늘 날씨를 근거로 한 추천 이유 한 문장 (존댓말)',
+              },
             },
-            top: {
-              type: Type.STRING,
-              description: '상의 추천 한 줄',
-            },
-            bottom: {
-              type: Type.STRING,
-              description: '하의 추천 한 줄',
-            },
-            shoes: {
-              type: Type.STRING,
-              description: '신발 추천 한 줄',
-            },
-            accessory: {
-              type: Type.STRING,
-              description: '소품 추천 한 줄 (비 올 확률이 높으면 우산 포함)',
-            },
-            reason: {
-              type: Type.STRING,
-              description: '오늘 날씨를 근거로 한 추천 이유 한 문장 (존댓말)',
-            },
+            required: ['outer', 'top', 'bottom', 'shoes', 'accessory', 'reason'],
           },
-          required: ['outer', 'top', 'bottom', 'shoes', 'accessory', 'reason'],
         },
-      },
-    });
+      });
 
-    const rawText = (response.text ?? '').trim();
-    if (!rawText) {
-      sendJson(res, 502, { error: '추천 응답이 비어 있어요.' });
+      const rawText = stripJsonCodeFence(response.text ?? '');
+      if (!rawText) {
+        sendJson(res, 502, { error: '추천 응답이 비어 있어요.' });
+        return;
+      }
+
+      const parsed = JSON.parse(rawText) as Partial<OutfitRecommendation>;
+      if (
+        typeof parsed.outer !== 'string' ||
+        !parsed.outer.trim() ||
+        typeof parsed.top !== 'string' ||
+        !parsed.top.trim() ||
+        typeof parsed.bottom !== 'string' ||
+        !parsed.bottom.trim() ||
+        typeof parsed.shoes !== 'string' ||
+        !parsed.shoes.trim() ||
+        typeof parsed.accessory !== 'string' ||
+        !parsed.accessory.trim() ||
+        typeof parsed.reason !== 'string' ||
+        !parsed.reason.trim()
+      ) {
+        sendJson(res, 502, { error: '추천 정보 형식이 올바르지 않아요.' });
+        return;
+      }
+
+      sendJson(res, 200, {
+        recommendation: {
+          outer: parsed.outer.trim(),
+          top: parsed.top.trim(),
+          bottom: parsed.bottom.trim(),
+          shoes: parsed.shoes.trim(),
+          accessory: parsed.accessory.trim(),
+          reason: parsed.reason.trim(),
+        },
+      });
       return;
-    }
+    } catch (err) {
+      lastError = err;
+      const status = extractHttpStatus(err);
+      console.error(`Gemini recommendation error (model=${modelName}):`, err);
 
-    const parsed = JSON.parse(rawText) as Partial<OutfitRecommendation>;
-    if (
-      typeof parsed.outer !== 'string' ||
-      !parsed.outer.trim() ||
-      typeof parsed.top !== 'string' ||
-      !parsed.top.trim() ||
-      typeof parsed.bottom !== 'string' ||
-      !parsed.bottom.trim() ||
-      typeof parsed.shoes !== 'string' ||
-      !parsed.shoes.trim() ||
-      typeof parsed.accessory !== 'string' ||
-      !parsed.accessory.trim() ||
-      typeof parsed.reason !== 'string' ||
-      !parsed.reason.trim()
-    ) {
-      sendJson(res, 502, { error: '추천 정보 형식이 올바르지 않아요.' });
-      return;
+      // Retry with fallback model only if the model is unavailable/not found
+      if (status === 404 || status === 400) {
+        continue;
+      }
+      break;
     }
-
-    sendJson(res, 200, {
-      recommendation: {
-        outer: parsed.outer.trim(),
-        top: parsed.top.trim(),
-        bottom: parsed.bottom.trim(),
-        shoes: parsed.shoes.trim(),
-        accessory: parsed.accessory.trim(),
-        reason: parsed.reason.trim(),
-      },
-    });
-  } catch (err) {
-    console.error('Gemini recommendation error:', err);
-    sendJson(res, 502, { error: '지금은 추천할 수 없어요.' });
   }
+
+  const finalStatus = extractHttpStatus(lastError);
+  if (finalStatus === 400 || finalStatus === 403) {
+    sendJson(res, 502, {
+      error: 'Gemini API 키가 올바르지 않거나 권한이 없어요. 환경 변수를 확인해 주세요.',
+    });
+    return;
+  }
+  if (finalStatus === 429) {
+    sendJson(res, 429, {
+      error: '요청이 많아 잠시 기다려야 해요. 잠시 후 다시 눌러 주세요.',
+    });
+    return;
+  }
+  if (finalStatus === 404) {
+    sendJson(res, 502, {
+      error: 'AI 모델을 불러오지 못했어요. 잠시 후 다시 시도해 주세요.',
+    });
+    return;
+  }
+
+  sendJson(res, 502, { error: '지금은 추천할 수 없어요. 잠시 후 다시 눌러 주세요.' });
 }
